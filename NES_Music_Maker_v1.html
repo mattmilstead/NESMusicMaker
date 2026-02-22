@@ -1750,7 +1750,7 @@
 
         // NES frequency table (NTSC)
         const NES_FREQUENCIES = [
-            // C, C#, D, D#, E, F, F#, G, G#, A, A#, B for octaves 2-7
+            // C, C#, D, D#, E, F, F#, G, G#, A, A#, B for octaves 1-6
             65.41, 69.30, 73.42, 77.78, 82.41, 87.31, 92.50, 98.00, 103.83, 110.00, 116.54, 123.47,
             130.81, 138.59, 146.83, 155.56, 164.81, 174.61, 185.00, 196.00, 207.65, 220.00, 233.08, 246.94,
             261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392.00, 415.30, 440.00, 466.16, 493.88,
@@ -1773,7 +1773,7 @@
                 }
             }
             
-            const octave = Math.floor(closestIdx / 12) + 2;
+            const octave = Math.floor(closestIdx / 12) + 1;
             const note = NOTE_NAMES[closestIdx % 12];
             return `${note}${octave}`;
         }
@@ -1900,8 +1900,8 @@
             if (noteIndex === undefined) return null;
             
             // Calculate frequency index in NES_FREQUENCIES array
-            // Octave 2 starts at index 0, octave 3 at index 12, etc.
-            const freqIndex = (octave - 2) * 12 + noteIndex;
+            // Octave 1 starts at index 0, octave 2 at index 12, etc.
+            const freqIndex = (octave - 1) * 12 + noteIndex;
             
             if (freqIndex < 0 || freqIndex >= NES_FREQUENCIES.length) return null;
             
@@ -1921,7 +1921,7 @@
                 }
             }
             
-            const octave = Math.floor(closestIdx / 12) + 2;
+            const octave = Math.floor(closestIdx / 12) + 1;
             const noteIdx = closestIdx % 12;
             const noteName = NOTE_NAMES[noteIdx];
             
@@ -2042,7 +2042,21 @@ PATTERN 00
                 const track = convertedTracks[channel];
                 if (track && track.notes) {
                     // Sort notes by time to process them in order
-                    const sortedNotes = [...track.notes].sort((a, b) => a.time - b.time);
+                    let sortedNotes = [...track.notes].sort((a, b) => a.time - b.time);
+                    
+                    // DEDUPLICATE: Remove duplicate notes at the same time, keeping the last one
+                    const deduplicatedNotes = [];
+                    for (let i = 0; i < sortedNotes.length; i++) {
+                        const currentNote = sortedNotes[i];
+                        const nextNote = sortedNotes[i + 1];
+                        
+                        // Only keep this note if the next note is at a different time
+                        if (!nextNote || Math.abs(nextNote.time - currentNote.time) > 0.001) {
+                            deduplicatedNotes.push(currentNote);
+                        }
+                    }
+                    
+                    sortedNotes = deduplicatedNotes;
                     
                     sortedNotes.forEach((note, idx) => {
                         let row = Math.round(note.time / secondsPerRow);
@@ -2060,8 +2074,8 @@ PATTERN 00
                                 channelNotes[channel][row] = note;
                                 
                                 // Cut off any previous notes that would overlap with this one
-                                // Check all previous rows and shorten notes that extend into this row's time
-                                const noteStartTime = row * secondsPerRow;
+                                // Use the note's actual time, not the row time (which may have been adjusted)
+                                const noteStartTime = note.time;
                                 for (let prevRow = 0; prevRow < row; prevRow++) {
                                     const prevNote = channelNotes[channel][prevRow];
                                     if (prevNote) {
@@ -2095,15 +2109,13 @@ PATTERN 00
                     for (let prevRow = row - 1; prevRow >= 0; prevRow--) {
                         if (channelNotes[channel][prevRow]) {
                             const prevNote = channelNotes[channel][prevRow];
-                            const prevNoteStartTime = prevRow * secondsPerRow;
-                            const prevNoteEndTime = prevNoteStartTime + prevNote.duration;
+                            const prevNoteEndTime = prevNote.time + prevNote.duration;
                             const currentRowTime = row * secondsPerRow;
                             
-                            // Check if the note should end at or before this row
-                            // Use a small tolerance to account for rounding
-                            const tolerance = secondsPerRow * 0.1;
-                            if (prevNoteEndTime <= currentRowTime + tolerance && 
-                                prevNoteEndTime >= currentRowTime - tolerance) {
+                            // The note should be cut if it ends exactly at this row
+                            // Allow for small floating point errors
+                            const diff = Math.abs(prevNoteEndTime - currentRowTime);
+                            if (diff < 0.001) { // Very tight tolerance
                                 return true;
                             }
                             break;
@@ -2122,6 +2134,20 @@ PATTERN 00
                     p1 = `${noteName.padEnd(3)} ${instHex} . ...`;
                 } else if (shouldCutNote('pulse1', row)) {
                     p1 = '--- .. . ...'; // Note release
+                } else {
+                    // Check if NEXT row has a note with same pitch as a recent note - add cut
+                    const nextNote = channelNotes.pulse1[row + 1];
+                    if (nextNote) {
+                        for (let prevRow = row; prevRow >= Math.max(0, row - 4); prevRow--) {
+                            if (channelNotes.pulse1[prevRow]) {
+                                const prevNote = channelNotes.pulse1[prevRow];
+                                if (Math.abs(prevNote.frequency - nextNote.frequency) < 0.1) {
+                                    p1 = '--- .. . ...'; // Cut before same-pitch retrigger
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
                 
                 // Pulse 2
@@ -2134,6 +2160,19 @@ PATTERN 00
                     p2 = `${noteName.padEnd(3)} ${instHex} . ...`;
                 } else if (shouldCutNote('pulse2', row)) {
                     p2 = '--- .. . ...'; // Note release
+                } else {
+                    const nextNote = channelNotes.pulse2[row + 1];
+                    if (nextNote) {
+                        for (let prevRow = row; prevRow >= Math.max(0, row - 4); prevRow--) {
+                            if (channelNotes.pulse2[prevRow]) {
+                                const prevNote = channelNotes.pulse2[prevRow];
+                                if (Math.abs(prevNote.frequency - nextNote.frequency) < 0.1) {
+                                    p2 = '--- .. . ...';
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
                 
                 // Triangle
@@ -2146,6 +2185,19 @@ PATTERN 00
                     tri = `${noteName.padEnd(3)} ${instHex} . ...`;
                 } else if (shouldCutNote('triangle', row)) {
                     tri = '--- .. . ...'; // Note release
+                } else {
+                    const nextNote = channelNotes.triangle[row + 1];
+                    if (nextNote) {
+                        for (let prevRow = row; prevRow >= Math.max(0, row - 4); prevRow--) {
+                            if (channelNotes.triangle[prevRow]) {
+                                const prevNote = channelNotes.triangle[prevRow];
+                                if (Math.abs(prevNote.frequency - nextNote.frequency) < 0.1) {
+                                    tri = '--- .. . ...';
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
                 
                 // Noise
@@ -2154,6 +2206,8 @@ PATTERN 00
                     const note = channelNotes.noise[row];
                     const instIdx = instruments.findIndex(i => i.id === (note.instrument || 1));
                     const instHex = (instIdx >= 0 ? instIdx : 0).toString(16).toUpperCase().padStart(2, '0');
+                    
+                    // Noise doesn't need same-pitch check since it's always the same "pitch"
                     noise = `8-# ${instHex} . ...`;
                 } else if (shouldCutNote('noise', row)) {
                     noise = '--- .. . ...'; // Note release
@@ -3704,6 +3758,14 @@ PATTERN 00
                 instrument: currentDrawingInstrument
             };
             
+            // Remove any existing notes at the exact same time (within 0.001s tolerance)
+            const track = convertedTracks[channel];
+            if (track && track.notes) {
+                track.notes = track.notes.filter(existingNote => {
+                    return Math.abs(existingNote.time - time) > 0.001;
+                });
+            }
+            
             convertedTracks[channel].notes.push(note);
             handleNoteOverlap(channel, note);
             renderInlinePianoRoll(channel);
@@ -5143,6 +5205,13 @@ PATTERN 00
                         songLength = projectData.songLength || songLength;
                         currentDrawingInstrument = projectData.currentDrawingInstrument || currentDrawingInstrument;
                         
+                        // Restore BPM
+                        if (projectData.bpm) {
+                            bpm = projectData.bpm;
+                            const bpmInput = document.getElementById('bpmInput');
+                            if (bpmInput) bpmInput.value = bpm;
+                        }
+                        
                         if (projectData.zoomLevel) {
                             zoomLevel = projectData.zoomLevel;
                             pixelsPerSecond = (zoomLevel / 100) * 50;
@@ -6453,7 +6522,19 @@ PATTERN 00
             const skipRestore = localStorage.getItem('nes-music-maker-skip-restore');
             if (skipRestore) {
                 localStorage.removeItem('nes-music-maker-skip-restore');
-                console.log('Skipping auto-restore (New project)');
+                console.log('Skipping auto-restore (New project) - resetting to defaults');
+                
+                // Reset to defaults
+                songLength = 30;
+                bpm = 120;
+                
+                // Update UI
+                const bpmInput = document.getElementById('bpmInput');
+                if (bpmInput) bpmInput.value = 120;
+                
+                const songLengthInput = document.getElementById('songLengthInput');
+                if (songLengthInput) songLengthInput.value = 30;
+                
                 return false;
             }
             
