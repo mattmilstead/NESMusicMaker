@@ -763,6 +763,10 @@
                     <button id="exportBtn" style="width: 100%; padding: 8px; font-size: 0.8rem; background: linear-gradient(135deg, var(--accent-4) 0%, #d69e00 100%); border: none; border-radius: 4px; cursor: pointer; color: white;">
                         📤 Export FamiTracker
                     </button>
+                    
+                    <button id="exportWavBtn" style="width: 100%; padding: 8px; font-size: 0.8rem; background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%); border: none; border-radius: 4px; cursor: pointer; color: white; margin-top: 8px;">
+                        🎵 Export WAV
+                    </button>
                 </div>
 
                 <!-- Song Settings -->
@@ -2237,6 +2241,159 @@ PATTERN 00
                 document.getElementById('exportTitle').focus();
                 document.getElementById('exportTitle').select();
             });
+        }
+        
+        // WAV Export function
+        async function exportToWav() {
+            updateStatus('<span class="processing">RENDERING...</span> Generating WAV audio...');
+            
+            try {
+                const sampleRate = 44100;
+                const duration = songLength;
+                const numSamples = Math.floor(sampleRate * duration);
+                
+                // Create offline audio context
+                const offlineContext = new OfflineAudioContext(1, numSamples, sampleRate);
+                
+                // Render each track
+                for (const [channel, track] of Object.entries(convertedTracks)) {
+                    if (!track || !track.notes || track.notes.length === 0) continue;
+                    
+                    for (const note of track.notes) {
+                        const startTime = note.time;
+                        const noteLength = note.duration;
+                        const freq = note.frequency;
+                        
+                        if (channel === 'noise') {
+                            // Create white noise buffer
+                            const bufferSize = Math.floor(sampleRate * noteLength);
+                            const noiseBuffer = offlineContext.createBuffer(1, bufferSize, sampleRate);
+                            const output = noiseBuffer.getChannelData(0);
+                            
+                            // Generate white noise
+                            for (let i = 0; i < bufferSize; i++) {
+                                output[i] = Math.random() * 2 - 1;
+                            }
+                            
+                            const noiseSource = offlineContext.createBufferSource();
+                            noiseSource.buffer = noiseBuffer;
+                            
+                            const gainNode = offlineContext.createGain();
+                            const volume = (note.velocity || 0.8) * 0.15;
+                            gainNode.gain.setValueAtTime(0, startTime);
+                            gainNode.gain.linearRampToValueAtTime(volume, startTime + 0.01);
+                            gainNode.gain.setValueAtTime(volume, startTime + noteLength - 0.01);
+                            gainNode.gain.linearRampToValueAtTime(0, startTime + noteLength);
+                            
+                            noiseSource.connect(gainNode);
+                            gainNode.connect(offlineContext.destination);
+                            noiseSource.start(startTime);
+                        } else {
+                            // Create oscillator for pitched channels
+                            const osc = offlineContext.createOscillator();
+                            const gainNode = offlineContext.createGain();
+                            
+                            // Set waveform based on channel
+                            if (channel === 'pulse1' || channel === 'pulse2') {
+                                osc.type = 'square';
+                            } else if (channel === 'triangle') {
+                                osc.type = 'triangle';
+                            }
+                            
+                            osc.frequency.setValueAtTime(freq, startTime);
+                            
+                            // Apply volume envelope
+                            const volume = (note.velocity || 0.8) * 0.15;
+                            gainNode.gain.setValueAtTime(0, startTime);
+                            gainNode.gain.linearRampToValueAtTime(volume, startTime + 0.01);
+                            gainNode.gain.setValueAtTime(volume, startTime + noteLength - 0.01);
+                            gainNode.gain.linearRampToValueAtTime(0, startTime + noteLength);
+                            
+                            osc.connect(gainNode);
+                            gainNode.connect(offlineContext.destination);
+                            
+                            osc.start(startTime);
+                            osc.stop(startTime + noteLength);
+                        }
+                    }
+                }
+                
+                // Render the audio
+                const renderedBuffer = await offlineContext.startRendering();
+                
+                // Convert to WAV
+                const wavBuffer = audioBufferToWav(renderedBuffer);
+                const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+                
+                // Download
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'nes-music-export.wav';
+                a.click();
+                URL.revokeObjectURL(url);
+                
+                updateStatus('✓ WAV export complete!');
+            } catch (error) {
+                console.error('WAV export error:', error);
+                updateStatus(`✗ WAV export failed: ${error.message}`);
+            }
+        }
+        
+        // Convert AudioBuffer to WAV format
+        function audioBufferToWav(buffer) {
+            const numChannels = buffer.numberOfChannels;
+            const sampleRate = buffer.sampleRate;
+            const format = 1; // PCM
+            const bitDepth = 16;
+            
+            const bytesPerSample = bitDepth / 8;
+            const blockAlign = numChannels * bytesPerSample;
+            
+            const data = buffer.getChannelData(0);
+            const dataLength = data.length * bytesPerSample;
+            const headerLength = 44;
+            const totalLength = headerLength + dataLength;
+            
+            const arrayBuffer = new ArrayBuffer(totalLength);
+            const view = new DataView(arrayBuffer);
+            
+            // Write WAV header
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, totalLength - 8, true);
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // Subchunk1Size
+            view.setUint16(20, format, true);
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * blockAlign, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, bitDepth, true);
+            writeString(view, 36, 'data');
+            view.setUint32(40, dataLength, true);
+            
+            // Write audio data
+            let offset = 44;
+            for (let i = 0; i < data.length; i++) {
+                const sample = Math.max(-1, Math.min(1, data[i]));
+                view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                offset += 2;
+            }
+            
+            return arrayBuffer;
+        }
+        
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+        
+        // WAV Export button handler
+        const exportWavBtn = document.getElementById('exportWavBtn');
+        if (exportWavBtn) {
+            exportWavBtn.addEventListener('click', exportToWav);
         }
         
         // Export modal handlers (set up once DOM is loaded)
